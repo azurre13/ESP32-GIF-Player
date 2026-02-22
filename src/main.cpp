@@ -1,98 +1,108 @@
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
 #include <AnimatedGIF.h>
-
-// Panggil file wadah GIF tadi
 #include "gif_data.h"
 
-// --- PINOUT S3 N16R8 KE ST7789 (7-PIN) ---
 #define TFT_DC   2
 #define TFT_RST  4
-#define TFT_CS  -1  // CS gak dipake di 7-pin
-#define TFT_SDA 16  // Pin Data (MOSI)
-#define TFT_SCL 17  // Pin Clock (SCK)
+#define TFT_CS  -1
+#define TFT_SDA 16
+#define TFT_SCL 17
 
 Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCL, TFT_SDA);
 Arduino_GFX *gfx = new Arduino_ST7789(bus, TFT_RST, 0, true, 240, 240);
-
 AnimatedGIF gif;
 
-// --- FUNGSI 'MAGIC' PENGGAMBAR GIF DARI TUTORIAL ---
+int currentLoad = 0;
+int currentTemp = 0;
+int lastLoad = -1;  // Buat ngecek kapan angka berubah
+int lastTemp = -1;
+int activeGif = -1;
+
+// --- TRIK DEWA: POTONG GIF BUAT TEMPAT TEKS ---
 void GIFDraw(GIFDRAW *pDraw) {
-  uint8_t *s;
-  uint16_t *usPalette, usTemp[320];
-  int x, y, iWidth;
+    uint8_t *s;
+    uint16_t *usPalette, usTemp[320];
+    int x, y, iWidth;
 
-  iWidth = pDraw->iWidth;
-  if (iWidth > 240) iWidth = 240; 
+    iWidth = pDraw->iWidth;
+    if (iWidth > 240) iWidth = 240;
+    usPalette = pDraw->pPalette;
+    y = pDraw->iY + pDraw->y;
+    
+    // JANGAN gambar pixel GIF di area Y 0 sampai 40 (Biar teks gak tertimpa!)
+    if (y <= 40) return; 
 
-  usPalette = pDraw->pPalette;
-  y = pDraw->iY + pDraw->y; 
-
-  s = pDraw->pPixels;
-  if (pDraw->ucDisposalMethod == 2) { 
-    for (x = 0; x < iWidth; x++) {
-      if (s[x] == pDraw->ucTransparent) s[x] = pDraw->ucBackground;
-    }
-    pDraw->ucHasTransparency = 0;
-  }
-
-  if (pDraw->ucHasTransparency) {
-    uint8_t *pEnd, c, ucTransparent = pDraw->ucTransparent;
-    int iCount;
-    pEnd = s + iWidth;
-    x = 0;
-    while (s < pEnd) {
-      c = *s++;
-      if (c == ucTransparent) {
-        s--; s++; iCount = 1;
-        while (s < pEnd && *s == ucTransparent) { s++; iCount++; }
-        x += iCount;
-      } else {
-        s--; iCount = 1;
-        while (s < pEnd && *s != ucTransparent) { s++; iCount++; }
-        for (int i=0; i<iCount; i++) usTemp[i] = usPalette[*(s - iCount + i)];
-        gfx->draw16bitRGBBitmap(pDraw->iX + x, y, usTemp, iCount, 1);
-        x += iCount;
-      }
-    }
-  } else {
     s = pDraw->pPixels;
     for (x = 0; x < iWidth; x++) usTemp[x] = usPalette[*s++];
     gfx->draw16bitRGBBitmap(pDraw->iX, y, usTemp, iWidth, 1);
-  }
 }
 
 void setup() {
-  Serial.begin(115200);
+    Serial.begin(115200);
+    pinMode(TFT_RST, OUTPUT);
+    digitalWrite(TFT_RST, LOW); delay(200);
+    digitalWrite(TFT_RST, HIGH); delay(200);
 
-  // Nyalakan Layar
-  gfx->begin();
-  gfx->fillScreen(BLACK);
-  
-  // Tulis pesan tes
-  gfx->setTextColor(GREEN);
-  gfx->setTextSize(2);
-  gfx->setCursor(20, 110);
-  gfx->println("SYSTEM READY");
-  gfx->setCursor(20, 140);
-  gfx->setTextSize(1);
-  gfx->setTextColor(WHITE);
-  gfx->println("(Menunggu GIF Asli...)");
-
-  // Init Library GIF
-  gif.begin(LITTLE_ENDIAN_PIXELS);
+    gfx->begin();
+    gfx->fillScreen(BLACK);
+    gif.begin(LITTLE_ENDIAN_PIXELS);
 }
 
 void loop() {
-  // Mainkan GIF dari Memory
-  if (gif.open((uint8_t *)GIF_IMAGE, sizeof(GIF_IMAGE), GIFDraw)) {
-    while (gif.playFrame(true, NULL)) {
-      // Looping frame
+    // 1. TERIMA DATA LEBIH AMAN DARI PC
+    if (Serial.available()) {
+        String data = Serial.readStringUntil('\n');
+        data.trim(); // Bersihkan sisa karakter aneh
+        int commaIndex = data.indexOf(',');
+        
+        if (commaIndex > 0) {
+            String loadStr = data.substring(0, commaIndex);
+            String tempStr = data.substring(commaIndex + 1);
+            
+            // Validasi: Pastikan data benar-benar angka, bukan kosong
+            if (loadStr.length() > 0 && tempStr.length() > 0) {
+                currentLoad = loadStr.toInt();
+                currentTemp = tempStr.toInt();
+            }
+        }
     }
-    gif.close();
-  } else {
-    // Kalau gagal (karena masih file dummy), diam aja
-    delay(1000);
-  }
+
+    // 2. GANTI GIF (>= 50% Ever, < 50% Miyabi)
+    int targetGif = (currentLoad >= 50) ? 1 : 0;
+    if (targetGif != activeGif) {
+        if (activeGif != -1) gif.close();
+        activeGif = targetGif;
+        
+        if (activeGif == 1) {
+            gif.open((uint8_t *)GIF_EVER, GIF_EVER_size, GIFDraw);
+        } else {
+            gif.open((uint8_t *)GIF_MIYABI, GIF_MIYABI_size, GIFDraw);
+        }
+    }
+
+    // 3. PUTAR GIF
+    int result = gif.playFrame(true, NULL);
+    if (result <= 0) gif.reset();
+
+    // 4. UPDATE TEKS HANYA KALAU ANGKA BERUBAH
+    if (currentLoad != lastLoad || currentTemp != lastTemp) {
+        // Bersihkan kotak atas pakai warna hitam
+        gfx->fillRect(0, 0, 240, 40, BLACK);
+        
+        gfx->setTextSize(2);
+        
+        // Teks Load
+        gfx->setTextColor(GREEN);
+        gfx->setCursor(5, 5);
+        gfx->print("GPU:"); gfx->print(currentLoad); gfx->print("% "); 
+        
+        // Teks Temp
+        gfx->setTextColor(CYAN);
+        gfx->setCursor(5, 25);
+        gfx->print("TMP:"); gfx->print(currentTemp); gfx->print("C ");
+        
+        lastLoad = currentLoad;
+        lastTemp = currentTemp;
+    }
 }
